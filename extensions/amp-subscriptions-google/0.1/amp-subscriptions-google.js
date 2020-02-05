@@ -19,12 +19,15 @@ import {
   ActionStatus,
   SubscriptionAnalyticsEvents,
 } from '../../amp-subscriptions/0.1/analytics';
-import {CSS} from '../../../build/amp-subscriptions-google-0.1.css';
 import {
+  AnalyticsEvent,
   ConfiguredRuntime,
+  EventOriginator,
   Fetcher,
+  FilterResult,
   SubscribeResponse,
 } from '../../../third_party/subscriptions-project/swg';
+import {CSS} from '../../../build/amp-subscriptions-google-0.1.css';
 import {DocImpl} from '../../amp-subscriptions/0.1/doc-impl';
 import {
   Entitlement,
@@ -33,13 +36,32 @@ import {
 import {PageConfig} from '../../../third_party/subscriptions-project/config';
 import {Services} from '../../../src/services';
 import {SubscriptionsScoreFactor} from '../../amp-subscriptions/0.1/score-factors.js';
+import {experimentToggles, isExperimentOn} from '../../../src/experiments';
+import {getData} from '../../../src/event-helper';
 import {installStylesForDoc} from '../../../src/style-installer';
 import {parseUrlDeprecated} from '../../../src/url';
+import {startsWith} from '../../../src/string';
 import {userAssert} from '../../../src/log';
 
 const TAG = 'amp-subscriptions-google';
 const PLATFORM_ID = 'subscribe.google.com';
 const GOOGLE_DOMAIN_RE = /(^|\.)google\.(com?|[a-z]{2}|com?\.[a-z]{2}|cat)$/;
+
+const SWG_EVENTS_TO_SUPPRESS = {
+  [AnalyticsEvent.IMPRESSION_PAYWALL]: true,
+  [AnalyticsEvent.IMPRESSION_PAGE_LOAD]: true,
+};
+
+const AMP_EVENT_TO_SWG_EVENT = {
+  [SubscriptionAnalyticsEvents.PAYWALL_ACTIVATED]:
+    AnalyticsEvent.IMPRESSION_PAYWALL,
+};
+
+const AMP_ACTION_TO_SWG_EVENT = {
+  [Action.SHOW_OFFERS]: {
+    [ActionStatus.STARTED]: null, //ex: AnalyticsEvent.IMPRESSION_OFFERS
+  },
+};
 
 /**
  */
@@ -87,15 +109,44 @@ export class GoogleSubscriptionsPlatform {
      * {!../../amp-subscriptions/0.1/analytics.SubscriptionAnalytics}
      */
     this.subscriptionAnalytics_ = serviceAdapter.getAnalytics();
+    this.subscriptionAnalytics_.registerEventListener(
+      this.handleAnalyticsEvent_.bind(this)
+    );
 
+    // Map AMP experiments prefixed with 'swg-' to SwG experiments.
+    const ampExperimentsForSwg = Object.keys(experimentToggles(ampdoc.win))
+      .filter(
+        exp => startsWith(exp, 'swg-') && isExperimentOn(ampdoc.win, /*OK*/ exp)
+      )
+      .map(exp => exp.substring(4));
+
+    const swgConfig = {'experiments': ampExperimentsForSwg};
+    let resolver = null;
     /** @private @const {!ConfiguredRuntime} */
     this.runtime_ = new ConfiguredRuntime(
       new DocImpl(ampdoc),
       serviceAdapter.getPageConfig(),
       {
         fetcher: new AmpFetcher(ampdoc.win),
-      }
+        configPromise: new Promise(resolve => (resolver = resolve)),
+      },
+      swgConfig
     );
+
+    /** @private @const {!../../../third_party/subscriptions-project/swg.ClientEventManagerApi} */
+    this.eventManager_ = this.runtime_.eventManager();
+    this.eventManager_.registerEventFilterer(
+      GoogleSubscriptionsPlatform.filterSwgEvent_
+    );
+    this.eventManager_.logEvent({
+      eventType: AnalyticsEvent.IMPRESSION_PAGE_LOAD,
+      eventOriginator: EventOriginator.AMP_CLIENT,
+      isFromUserAction: false,
+      additionalParameters: null,
+    });
+    this.runtime_.analytics().setUrl(ampdoc.getUrl());
+    resolver();
+
     this.runtime_.setOnLoginRequest(request => {
       this.onLoginRequest_(request && request.linkRequested);
     });
@@ -113,6 +164,21 @@ export class GoogleSubscriptionsPlatform {
       );
     });
     this.runtime_.setOnFlowStarted(e => {
+      // This information is used by Propensity.
+      const params = /** @type {!JsonObject} */ ({});
+      const data = /** @type {!JsonObject} */ (getData(e) || {});
+      switch (e.flow) {
+        case Action.SUBSCRIBE:
+          params['product'] =
+            data['skuId'] || data['product'] || 'unknown productId';
+          params['active'] = true;
+          break;
+        case Action.SHOW_OFFERS:
+          params['skus'] = data['skus'] || '*';
+          params['source'] = data['source'] || 'unknown triggering source';
+          params['active'] = data['active'] || null;
+          break;
+      }
       if (
         e.flow == Action.SUBSCRIBE ||
         e.flow == Action.CONTRIBUTE ||
@@ -122,7 +188,8 @@ export class GoogleSubscriptionsPlatform {
         this.subscriptionAnalytics_.actionEvent(
           this.getServiceId(),
           e.flow,
-          ActionStatus.STARTED
+          ActionStatus.STARTED,
+          params
         );
       }
     });
@@ -155,14 +222,14 @@ export class GoogleSubscriptionsPlatform {
     this.runtime_.setOnNativeSubscribeRequest(() => {
       this.onNativeSubscribeRequest_();
     });
-    this.runtime_.setOnSubscribeResponse(promise => {
+    this.runtime_.setOnPaymentResponse(promise => {
       promise.then(response => {
-        this.onSubscribeResponse_(response, Action.SUBSCRIBE);
-      });
-    });
-    this.runtime_.setOnContributionResponse(promise => {
-      promise.then(response => {
-        this.onSubscribeResponse_(response, Action.CONTRIBUTE);
+        this.onSubscribeResponse_(
+          response,
+          response.productType === 'CONTRIBUTION'
+            ? Action.CONTRIBUTE
+            : Action.SUBSCRIBE
+        );
       });
     });
 
@@ -181,12 +248,55 @@ export class GoogleSubscriptionsPlatform {
   }
 
   /**
+   * Determines whether an event manager event should be canceled.
+   * @param {!../../../third_party/subscriptions-project/swg.ClientEvent} event
+   */
+  static filterSwgEvent_(event) {
+    if (event.eventOriginator !== EventOriginator.SWG_CLIENT) {
+      return FilterResult.PROCESS_EVENT;
+    }
+    return SWG_EVENTS_TO_SUPPRESS[event.eventType]
+      ? FilterResult.CANCEL_EVENT
+      : FilterResult.PROCESS_EVENT;
+  }
+
+  /**
+   * Listens for events from analytics and transmits them to the SwG event
+   * manager if appropriate.
+   * @param {!SubscriptionAnalyticsEvents|string} event
+   * @param {!JsonObject} optVarsUnused
+   * @param {!JsonObject} internalVars
+   */
+  handleAnalyticsEvent_(event, optVarsUnused, internalVars) {
+    let eventType = null;
+    const action = internalVars['action'];
+    const status = internalVars['status'];
+
+    if (AMP_EVENT_TO_SWG_EVENT[event]) {
+      eventType = AMP_EVENT_TO_SWG_EVENT[event];
+    } else if (action && AMP_ACTION_TO_SWG_EVENT[action]) {
+      eventType = AMP_ACTION_TO_SWG_EVENT[action][status];
+    }
+
+    if (!eventType) {
+      return;
+    }
+
+    this.eventManager_.logEvent({
+      eventType,
+      eventOriginator: EventOriginator.AMP_CLIENT,
+      isFromUserAction: null,
+      additionalParameters: null,
+    });
+  }
+
+  /**
    * @param {boolean} linkRequested
    * @private
    */
   onLoginRequest_(linkRequested) {
     if (linkRequested && this.isGoogleViewer_) {
-      this.runtime_.linkAccount();
+      this.loginWithAmpReaderId_();
       this.subscriptionAnalytics_.actionEvent(
         this.getServiceId(),
         Action.LINK,
@@ -200,6 +310,17 @@ export class GoogleSubscriptionsPlatform {
     } else {
       this.maybeComplete_(this.serviceAdapter_.delegateActionToLocal('login'));
     }
+  }
+
+  /**
+   * Kicks off login flow for account linking, and passes AMP Reader ID to authorization URL.
+   * @private
+   */
+  loginWithAmpReaderId_() {
+    // Get local AMP reader ID, to match the ID sent to local entitlement endpoints.
+    this.serviceAdapter_.getReaderId('local').then(ampReaderId => {
+      this.runtime_.linkAccount({ampReaderId});
+    });
   }
 
   /** @private */
@@ -236,10 +357,24 @@ export class GoogleSubscriptionsPlatform {
     response.complete().then(() => {
       this.serviceAdapter_.resetPlatforms();
     });
+    let product;
+    try {
+      const entitlement =
+        response.entitlements && response.entitlements.getEntitlementForThis();
+      if (entitlement) {
+        product = entitlement.getSku();
+      }
+    } catch (ex) {}
+    const params = /** @type {!JsonObject} */ ({
+      'active': true,
+      'product': product || 'unknown subscriptionToken',
+    });
+
     this.subscriptionAnalytics_.actionEvent(
       this.getServiceId(),
       eventType,
-      ActionStatus.SUCCESS
+      ActionStatus.SUCCESS,
+      params
     );
   }
 
@@ -252,9 +387,7 @@ export class GoogleSubscriptionsPlatform {
      * for the page to be visible to avoid leaking that the
      * page was prerendered
      */
-    // TODO(#23102): restore safe prerendering mode. Instead of `false`,
-    // return `this.isGoogleViewer_`.
-    return false;
+    return this.isGoogleViewer_;
   }
 
   /** @override */
@@ -272,8 +405,21 @@ export class GoogleSubscriptionsPlatform {
         }
 
         // Get the specifc entitlement we're looking for
-        const swgEntitlement = swgEntitlements.getEntitlementForThis();
-        if (!swgEntitlement) {
+        let swgEntitlement = swgEntitlements.getEntitlementForThis();
+        let granted = false;
+        if (swgEntitlement && swgEntitlement.source) {
+          granted = true;
+        } else if (
+          swgEntitlements.entitlements.length &&
+          swgEntitlements.entitlements[0].products.length
+        ) {
+          // We didn't find a grant so see if there is a non granting
+          // and return that. Note if we start returning multiple non
+          // granting we'll need to refactor to handle returning an
+          // array of Entitlement objects.
+          // #TODO(jpettitt) - refactor to handle multi entitlement case
+          swgEntitlement = swgEntitlements.entitlements[0];
+        } else {
           return null;
         }
         swgEntitlements.ack();
@@ -281,8 +427,9 @@ export class GoogleSubscriptionsPlatform {
           source: swgEntitlement.source,
           raw: swgEntitlements.raw,
           service: PLATFORM_ID,
-          granted: true, //swgEntitlements.getEntitlementForThis makes sure this is true.
-          grantReason: GrantReason.SUBSCRIBER, // there is no other case of subscription for SWG as of now.
+          granted,
+          // if it's granted it must be a subscriber
+          grantReason: granted ? GrantReason.SUBSCRIBER : null,
           dataObject: swgEntitlement.json(),
           decryptedDocumentKey: swgEntitlements.decryptedDocumentKey,
         });
@@ -342,7 +489,7 @@ export class GoogleSubscriptionsPlatform {
   }
 
   /**
-   * @param {!../../../src/service/viewer-impl.Viewer} viewer
+   * @param {!../../../src/service/viewer-interface.ViewerInterface} viewer
    * @private
    */
   resolveGoogleViewer_(viewer) {
@@ -400,7 +547,7 @@ export class GoogleSubscriptionsPlatform {
       return Promise.resolve(true);
     }
     if (action == Action.LOGIN) {
-      this.runtime_.linkAccount();
+      this.loginWithAmpReaderId_();
       return Promise.resolve(true);
     }
     return Promise.resolve(false);
@@ -456,8 +603,14 @@ class AmpFetcher {
     return this.xhr_
       .fetchJson(url, {
         credentials: 'include',
+        prerenderSafe: true,
       })
       .then(response => response.json());
+  }
+
+  /** @override */
+  fetch(input, opt_init) {
+    return this.xhr_.fetch(input, opt_init); //needed to kepp closure happy
   }
 }
 
@@ -465,7 +618,10 @@ class AmpFetcher {
 AMP.extension(TAG, '0.1', function(AMP) {
   AMP.registerServiceForDoc(
     'subscriptions-google',
-    /** @param {!../../../src/service/ampdoc-impl.AmpDoc} ampdoc */
+    /**
+     * @param {!../../../src/service/ampdoc-impl.AmpDoc} ampdoc
+     * @return {*} TODO(#23582): Specify return type
+     */
     ampdoc => {
       const platformService = new GoogleSubscriptionsPlatformService(ampdoc);
       const element = ampdoc.getHeadNode();
@@ -487,7 +643,9 @@ AMP.extension(TAG, '0.1', function(AMP) {
 
 /**
  * TODO(dvoytenko): remove once compiler type checking is fixed for third_party.
- * @package @visibleForTesting
+ * @package
+ * @visibleForTesting
+ * @return {*} TODO(#23582): Specify return type
  */
 export function getFetcherClassForTesting() {
   return Fetcher;
@@ -495,7 +653,9 @@ export function getFetcherClassForTesting() {
 
 /**
  * TODO(dvoytenko): remove once compiler type checking is fixed for third_party.
- * @package @visibleForTesting
+ * @package
+ * @visibleForTesting
+ * @return {*} TODO(#23582): Specify return type
  */
 export function getPageConfigClassForTesting() {
   return PageConfig;
@@ -503,7 +663,9 @@ export function getPageConfigClassForTesting() {
 
 /**
  * TODO(dvoytenko): remove once compiler type checking is fixed for third_party.
- * @package @visibleForTesting
+ * @package
+ * @visibleForTesting
+ * @return {*} TODO(#23582): Specify return type
  */
 export function getSubscribeResponseClassForTesting() {
   return SubscribeResponse;

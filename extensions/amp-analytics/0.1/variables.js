@@ -16,7 +16,8 @@
 
 import {Services} from '../../../src/services';
 import {base64UrlEncodeFromString} from '../../../src/utils/base64';
-import {devAssert, user, userAssert} from '../../../src/log';
+import {cookieReader} from './cookie-reader';
+import {dev, devAssert, user, userAssert} from '../../../src/log';
 import {dict} from '../../../src/utils/object';
 import {getConsentPolicyState} from '../../../src/consent';
 import {
@@ -213,10 +214,17 @@ export class VariableService {
   }
 
   /**
+   * @param {!Element} element
    * @return {!JsonObject} contains all registered macros
    */
-  getMacros() {
-    return this.macros_;
+  getMacros(element) {
+    const elementMacros = {
+      'COOKIE': name =>
+        cookieReader(this.ampdoc_.win, dev().assertElement(element), name),
+      'CONSENT_STATE': getConsentStateStr(element),
+    };
+    const merged = {...this.macros_, ...elementMacros};
+    return /** @type {!JsonObject} */ (merged);
   }
 
   /**
@@ -269,14 +277,15 @@ export class VariableService {
       let value = options.getVar(name);
 
       if (typeof value == 'string') {
-        value = this.expandTemplateSync(
-          value,
-          new ExpansionOptions(
-            options.vars,
-            options.iterations - 1,
-            true /* noEncode */
-          )
-        );
+        value = this.expandValue_(value, options);
+      } else if (isArray(value)) {
+        // Treat each value as a template and expand
+        for (let i = 0; i < value.length; i++) {
+          value[i] =
+            typeof value[i] == 'string'
+              ? this.expandValue_(value[i], options)
+              : value[i];
+        }
       }
 
       if (!options.noEncode) {
@@ -287,6 +296,22 @@ export class VariableService {
       }
       return value;
     });
+  }
+
+  /**
+   * @param {string} value
+   * @param {!ExpansionOptions} options
+   * @return {string}
+   */
+  expandValue_(value, options) {
+    return this.expandTemplateSync(
+      value,
+      new ExpansionOptions(
+        options.vars,
+        options.iterations - 1,
+        true /* noEncode */
+      )
+    );
   }
 
   /**
@@ -377,7 +402,7 @@ export function getNameArgsForTesting(key) {
  * @param {!Element} element
  * @return {!Promise<?string>}
  */
-export function getConsentStateStr(element) {
+function getConsentStateStr(element) {
   return getConsentPolicyState(element).then(consent => {
     if (!consent) {
       return null;

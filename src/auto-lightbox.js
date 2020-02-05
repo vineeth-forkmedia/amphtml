@@ -17,6 +17,8 @@
 import {ChunkPriority, chunk} from './chunk';
 import {Services} from './services';
 import {dev} from './log';
+import {isAmphtml} from './format';
+import {isStoryDocument} from './utils/story';
 
 /** @const @enum {string} */
 export const AutoLightboxEvents = {
@@ -26,16 +28,34 @@ export const AutoLightboxEvents = {
 };
 
 /**
+ * Installs the amp-auto-lightbox extension.
+ *
+ * This extension conditionally loads amp-lightbox-gallery for images and videos
+ * that fulfill a set criteria on certain documents.
+ *
+ * Further information on spec/auto-lightbox.md and the amp-auto-lightbox extension
+ * code.
  * @param {!./service/ampdoc-impl.AmpDoc} ampdoc
  */
 export function installAutoLightboxExtension(ampdoc) {
+  const {win} = ampdoc;
+  // Only enabled on single documents tagged as <html amp> or <html ⚡>.
+  if (!isAmphtml(win.document) || !ampdoc.isSingleDoc()) {
+    return;
+  }
   chunk(
     ampdoc,
     () => {
-      Services.extensionsFor(ampdoc.win).installExtensionForDoc(
-        ampdoc,
-        'amp-auto-lightbox'
-      );
+      isStoryDocument(ampdoc).then(isStory => {
+        // Do not enable on amp-story documents.
+        if (isStory) {
+          return;
+        }
+        Services.extensionsFor(win).installExtensionForDoc(
+          ampdoc,
+          'amp-auto-lightbox'
+        );
+      });
     },
     ChunkPriority.LOW
   );

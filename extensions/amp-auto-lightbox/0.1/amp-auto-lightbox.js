@@ -31,7 +31,6 @@ import {
   whenUpgradedToCustomElement,
 } from '../../../src/dom';
 import {dev} from '../../../src/log';
-import {getMode} from '../../../src/mode';
 import {toArray} from '../../../src/types';
 import {tryParseJson} from '../../../src/json';
 
@@ -246,6 +245,8 @@ export class Scanner {
   static getCandidates(root) {
     const selector = candidateSelector('amp-img');
     const candidates = toArray(root.querySelectorAll(selector));
+    // TODO(alanorozco): DOM mutations should be wrapped in mutate contexts.
+    // Alternatively, use in-memory "visited" marker instead of attribute.
     candidates.forEach(markAsVisited);
     return candidates;
   }
@@ -284,7 +285,10 @@ export class DocMetaAnnotations {
    */
   static getAllLdJsonTypes(ampdoc) {
     return toArray(getRootNode(ampdoc).querySelectorAll(SCRIPT_LD_JSON))
-      .map(({textContent}) => (tryParseJson(textContent) || {})['@type'])
+      .map(el => {
+        const {textContent} = el;
+        return (tryParseJson(textContent) || {})['@type'];
+      })
       .filter(typeOrUndefined => typeOrUndefined);
   }
 
@@ -339,30 +343,6 @@ function usesLightboxExplicitly(ampdoc) {
 }
 
 /**
- * @param {!../../../src/service/ampdoc-impl.AmpDoc} ampdoc
- * @return {boolean}
- */
-function isProxyOriginOrLocalDev(ampdoc) {
-  // Allow `localDev` in lieu of proxy origin for manual testing, except in
-  // tests where we need to actually perform the check.
-  const {win} = ampdoc;
-  if (getMode(win).localDev && !getMode(win).test) {
-    return true;
-  }
-
-  // An attached node is required for proxy origin check. If no elements are
-  // present, short-circuit.
-  const {firstElementChild} = ampdoc.getBody();
-  if (!firstElementChild) {
-    return false;
-  }
-
-  // TODO(alanorozco): Additionally check for transformed, webpackaged flag.
-  // See git.io/fhQ0a (#20359) for details.
-  return Services.urlForDoc(firstElementChild).isProxyOrigin(win.location);
-}
-
-/**
  * Determines whether auto-lightbox is enabled for a document.
  * @param {!../../../src/service/ampdoc-impl.AmpDoc} ampdoc
  * @return {boolean}
@@ -372,13 +352,10 @@ export function isEnabledForDoc(ampdoc) {
   if (usesLightboxExplicitly(ampdoc)) {
     return false;
   }
-  if (
-    !DocMetaAnnotations.hasValidOgType(ampdoc) &&
-    !DocMetaAnnotations.hasValidLdJsonType(ampdoc)
-  ) {
-    return false;
-  }
-  return isProxyOriginOrLocalDev(ampdoc);
+  return (
+    DocMetaAnnotations.hasValidOgType(ampdoc) ||
+    DocMetaAnnotations.hasValidLdJsonType(ampdoc)
+  );
 }
 
 /** @private {number} */
@@ -422,6 +399,11 @@ export function apply(ampdoc, element) {
 export function runCandidates(ampdoc, candidates) {
   return candidates.map(candidate =>
     whenLoaded(candidate).then(() => {
+      // <amp-img> will change the img's src inline data on unlayout and remove
+      // it from DOM, but a LOAD_END event would still be triggered afterwards.
+      if (candidate.signals().get(CommonSignals.UNLOAD)) {
+        return;
+      }
       if (!Criteria.meetsAll(candidate)) {
         return;
       }
@@ -446,9 +428,11 @@ export function scan(ampdoc, opt_root) {
   return runCandidates(ampdoc, Scanner.getCandidates(root));
 }
 
-AMP.extension(TAG, '0.1', ({ampdoc}) => {
+AMP.extension(TAG, '0.1', AMP => {
+  const {ampdoc} = AMP;
   ampdoc.whenReady().then(() => {
-    getRootNode(ampdoc).addEventListener(AmpEvents.DOM_UPDATE, ({target}) => {
+    getRootNode(ampdoc).addEventListener(AmpEvents.DOM_UPDATE, e => {
+      const {target} = e;
       scan(ampdoc, dev().assertElement(target));
     });
     scan(ampdoc);

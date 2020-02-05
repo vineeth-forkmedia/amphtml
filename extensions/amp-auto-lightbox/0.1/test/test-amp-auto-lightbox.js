@@ -52,8 +52,7 @@ describes.realWin(
   },
   env => {
     let html;
-
-    const {any} = sinon.match;
+    let any;
 
     const ldJsonSchemaTypes = Object.keys(ENABLED_LD_JSON_TYPES);
     const ogTypes = [ENABLED_OG_TYPE_ARTICLE];
@@ -92,14 +91,6 @@ describes.realWin(
         }
       });
 
-    function mockIsProxyOrigin(isProxyOrigin) {
-      env.sandbox.stub(Services, 'urlForDoc').returns({
-        isProxyOrigin() {
-          return isProxyOrigin;
-        },
-      });
-    }
-
     function spyInstallExtensionsForDoc() {
       const installExtensionForDoc = env.sandbox.spy();
 
@@ -112,7 +103,7 @@ describes.realWin(
 
     // necessary since element matching `withArgs` deep equals and overflows
     const matchEquals = comparison =>
-      sinon.match(subject => subject == comparison);
+      env.sandbox.match(subject => subject == comparison);
 
     function mockLoadedSignal(element, isLoadedSuccessfully) {
       const signals = new Signals();
@@ -126,6 +117,7 @@ describes.realWin(
     }
 
     beforeEach(() => {
+      any = env.sandbox.match.any;
       html = htmlFor(env.win.document);
 
       env.sandbox
@@ -145,14 +137,18 @@ describes.realWin(
           it(`${accepts ? 'accepts' : 'rejects'} ${accepts || rejects}`, () => {
             [
               html`
-                <amp-img src="asada.png"></amp-img>
-              `,
-              html`
-                <div><amp-img src="adobada.png"></amp-img></div>
+                <amp-img src="asada.png" layout="flex-item"></amp-img>
               `,
               html`
                 <div>
-                  <div><amp-img src="carnitas.png"></amp-img></div>
+                  <amp-img src="adobada.png" layout="flex-item"></amp-img>
+                </div>
+              `,
+              html`
+                <div>
+                  <div>
+                    <amp-img src="carnitas.png" layout="flex-item"></amp-img>
+                  </div>
                 </div>
               `,
             ].forEach(unwrapped => {
@@ -440,7 +436,6 @@ describes.realWin(
       it('does not load extension if no candidates found', async () => {
         const installExtensionForDoc = spyInstallExtensionsForDoc();
 
-        mockIsProxyOrigin(true);
         mockCandidates([]);
 
         await waitForAllScannedToBeResolved();
@@ -452,11 +447,10 @@ describes.realWin(
       it('loads extension if >= 1 candidates meet criteria', async () => {
         const installExtensionForDoc = spyInstallExtensionsForDoc();
 
-        mockIsProxyOrigin(true);
         mockCandidates([
           mockLoadedSignal(
             html`
-              <amp-img></amp-img>
+              <amp-img layout="flex-item"></amp-img>
             `,
             true
           ),
@@ -476,14 +470,13 @@ describes.realWin(
         mockCandidates([
           mockLoadedSignal(
             html`
-              <amp-img></amp-img>
+              <amp-img layout="flex-item"></amp-img>
             `,
             true
           ),
         ]);
 
         mockAllCriteriaMet(false);
-        mockIsProxyOrigin(true);
 
         await waitForAllScannedToBeResolved();
 
@@ -494,19 +487,19 @@ describes.realWin(
       it('sets attribute only for candidates that meet criteria', async () => {
         const a = mockLoadedSignal(
           html`
-            <amp-img src="a.png"></amp-img>
+            <amp-img src="a.png" layout="flex-item"></amp-img>
           `,
           true
         );
         const b = mockLoadedSignal(
           html`
-            <amp-img src="b.png"></amp-img>
+            <amp-img src="b.png" layout="flex-item"></amp-img>
           `,
           true
         );
         const c = mockLoadedSignal(
           html`
-            <amp-img src="c.png"></amp-img>
+            <amp-img src="c.png" layout="flex-item"></amp-img>
           `,
           true
         );
@@ -518,7 +511,6 @@ describes.realWin(
         allCriteriaMet.withArgs(matchEquals(c)).returns(true);
 
         mockCandidates([a, b, c]);
-        mockIsProxyOrigin(true);
 
         await waitForAllScannedToBeResolved();
 
@@ -532,7 +524,7 @@ describes.realWin(
           [1, 2, 3].map(() =>
             mockLoadedSignal(
               html`
-                <amp-img src="a.png"></amp-img>
+                <amp-img src="a.png" layout="flex-item"></amp-img>
               `,
               true
             )
@@ -540,7 +532,6 @@ describes.realWin(
         );
 
         mockAllCriteriaMet(true);
-        mockIsProxyOrigin(true);
 
         await waitForAllScannedToBeResolved();
 
@@ -553,17 +544,32 @@ describes.realWin(
     });
 
     describe('runCandidates', () => {
+      it('ignores amp-img load signal after being unlaid out', async () => {
+        const img = html`
+          <amp-img src="bla.png" layout="flex-item"></amp-img>
+        `;
+
+        const signals = new Signals();
+        img.signals = () => signals;
+
+        signals.signal(CommonSignals.UNLOAD);
+        signals.signal(CommonSignals.LOAD_END);
+
+        const elected = await Promise.all(runCandidates(env.ampdoc, [img]));
+        expect(elected[0]).to.be.undefined;
+      });
+
       it('filters out candidates that fail to load', async () => {
         const shouldNotLoad = mockLoadedSignal(
           html`
-            <amp-img src="bla.png"></amp-img>
+            <amp-img src="bla.png" layout="flex-item"></amp-img>
           `,
           false
         );
 
         const shouldLoad = mockLoadedSignal(
           html`
-            <amp-img src="bla.png"></amp-img>
+            <amp-img src="bla.png" layout="flex-item"></amp-img>
           `,
           true
         );
@@ -592,7 +598,6 @@ describes.realWin(
       };
 
       it('rejects documents without any type annotation', () => {
-        mockIsProxyOrigin(true);
         expectIsEnabled(false);
       });
 
@@ -674,7 +679,6 @@ describes.realWin(
 
       describe('by LD+JSON @type', () => {
         it('rejects doc with invalid LD+JSON @type', () => {
-          mockIsProxyOrigin(true);
           mockLdJsonSchemaTypes('hamberder');
           expectIsEnabled(false);
         });
@@ -682,9 +686,8 @@ describes.realWin(
         ldJsonSchemaTypes.forEach(type => {
           const typeSubObj = `{..."@type": "${type}"}`;
 
-          it(`accepts docs with ${typeSubObj} schema and proxy origin`, () => {
+          it(`accepts docs with ${typeSubObj} schema`, () => {
             mockLdJsonSchemaTypes(type);
-            mockIsProxyOrigin(true);
             expectIsEnabled(true);
           });
 
@@ -697,19 +700,13 @@ describes.realWin(
 
             const lightboxable = createElementWithAttributes(doc, 'amp-img', {
               [LIGHTBOXABLE_ATTR]: '',
+              layout: 'flex-item',
             });
 
             doc.head.appendChild(extensionScript);
             doc.body.appendChild(lightboxable);
 
             mockLdJsonSchemaTypes(type);
-            mockIsProxyOrigin(true);
-            expectIsEnabled(false);
-          });
-
-          it(`rejects docs with ${typeSubObj} schema, non-proxy origin`, () => {
-            mockLdJsonSchemaTypes(type);
-            mockIsProxyOrigin(false);
             expectIsEnabled(false);
           });
         });
@@ -717,7 +714,6 @@ describes.realWin(
 
       describe('by og:type', () => {
         it('rejects doc with invalid <meta property="og:type">', () => {
-          mockIsProxyOrigin(true);
           mockOgType('cinnamonroll');
           expectIsEnabled(false);
         });
@@ -725,9 +721,8 @@ describes.realWin(
         ogTypes.forEach(type => {
           const ogTypeMeta = `<meta property="og:type" content="${type}">`;
 
-          it(`accepts docs with ${ogTypeMeta} and proxy origin`, () => {
+          it(`accepts docs with ${ogTypeMeta}`, () => {
             mockOgType(type);
-            mockIsProxyOrigin(true);
             expectIsEnabled(true);
           });
 
@@ -740,19 +735,13 @@ describes.realWin(
 
             const lightboxable = createElementWithAttributes(doc, 'amp-img', {
               [LIGHTBOXABLE_ATTR]: '',
+              layout: 'flex-item',
             });
 
             doc.head.appendChild(extensionScript);
             doc.body.appendChild(lightboxable);
 
             mockOgType(type);
-            mockIsProxyOrigin(true);
-            expectIsEnabled(false);
-          });
-
-          it(`rejects docs with ${ogTypeMeta} for non-proxy origin`, () => {
-            mockOgType(type);
-            mockIsProxyOrigin(false);
             expectIsEnabled(false);
           });
         });
@@ -762,7 +751,7 @@ describes.realWin(
     describe('apply', () => {
       it('sets attribute', async () => {
         const element = html`
-          <amp-img src="chabuddy.g"></amp-img>
+          <amp-img src="chabuddy.g" layout="flex-item"></amp-img>
         `;
 
         await apply(env.ampdoc, element);
@@ -774,7 +763,7 @@ describes.realWin(
         const candidates = [1, 2, 3].map(
           () =>
             html`
-              <amp-img></amp-img>
+              <amp-img layout="flex-item"></amp-img>
             `
         );
 
@@ -789,7 +778,7 @@ describes.realWin(
 
       it('dispatches event', async () => {
         const element = html`
-          <amp-img src="chabuddy.g"></amp-img>
+          <amp-img src="chabuddy.g" layout="flex-item"></amp-img>
         `;
 
         element.dispatchCustomEvent = env.sandbox.spy();

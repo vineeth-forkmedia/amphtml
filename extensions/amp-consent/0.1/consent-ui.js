@@ -85,6 +85,12 @@ export class ConsentUI {
       config['uiConfig']['overlay'] === true;
 
     /** @private {boolean} */
+    this.restrictFullscreenOn_ = isExperimentOn(
+      baseInstance.win,
+      'amp-consent-restrict-fullscreen'
+    );
+
+    /** @private {boolean} */
     this.scrollEnabled_ = true;
 
     /** @private {?Element} */
@@ -96,8 +102,11 @@ export class ConsentUI {
     /** @private {!../../../src/service/ampdoc-impl.AmpDoc} */
     this.ampdoc_ = baseInstance.getAmpDoc();
 
-    /** @private {!../../../src/service/viewport/viewport-impl.Viewport} */
+    /** @private {!../../../src/service/viewport/viewport-interface.ViewportInterface} */
     this.viewport_ = Services.viewportForDoc(this.ampdoc_);
+
+    /** @private {?../../../src/service/viewer-interface.ViewerInterface} */
+    this.viewer_ = Services.viewerForDoc(this.ampdoc_);
 
     /** @private {!Element} */
     this.parent_ = baseInstance.element;
@@ -199,7 +208,7 @@ export class ConsentUI {
 
           this.showIframe_();
 
-          if (!this.isPostPrompt_) {
+          if (!this.isPostPrompt_ && !this.restrictFullscreenOn_) {
             this.ui_./*OK*/ focus();
           }
         });
@@ -220,7 +229,10 @@ export class ConsentUI {
           // scheduleLayout is required everytime because some AMP element may
           // get un laid out after toggle display (#unlayoutOnPause)
           // for example <amp-iframe>
-          this.baseInstance_.scheduleLayout(this.ui_);
+          Services.ownersForDoc(this.baseInstance_.element).scheduleLayout(
+            this.baseInstance_.element,
+            this.ui_
+          );
 
           this.ui_./*OK*/ focus();
         }
@@ -340,6 +352,12 @@ export class ConsentUI {
     }
 
     this.resetAnimationStyles_();
+
+    this.viewer_.sendMessage(
+      'requestFullOverlay',
+      dict(),
+      /* cancelUnsent */ true
+    );
 
     const {classList} = this.parent_;
     classList.add(consentUiClasses.iframeFullscreen);
@@ -519,10 +537,18 @@ export class ConsentUI {
 
     this.win_.removeEventListener('message', this.boundHandleIframeMessages_);
     classList.remove(consentUiClasses.iframeFullscreen);
+    if (this.isFullscreen_) {
+      this.viewer_.sendMessage(
+        'cancelFullOverlay',
+        dict(),
+        /* cancelUnsent */ true
+      );
+    }
     this.isFullscreen_ = false;
     classList.remove(consentUiClasses.in);
     this.isIframeVisible_ = false;
     this.ui_.removeAttribute('name');
+    toggle(dev().assertElement(this.placeholder_), false);
     removeElement(dev().assertElement(this.ui_));
   }
 
@@ -650,8 +676,13 @@ export class ConsentUI {
     }
 
     if (data['action'] === 'enter-fullscreen') {
-      // TODO (@torch2424) Send response back if enter fullscreen was succesful
-      if (!this.isIframeVisible_) {
+      // Do nothing if iframe not visible or it's not the active element.
+      if (
+        !this.isIframeVisible_ ||
+        (this.restrictFullscreenOn_ &&
+          this.document_.activeElement !== this.ui_)
+      ) {
+        // TODO (@torch2424) Send response back if enter fullscreen was succesful
         return;
       }
 

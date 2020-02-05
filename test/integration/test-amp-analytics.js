@@ -27,7 +27,9 @@ describe('amp-analytics', function() {
         document.cookie='_cid=amp-12345';
       </script>
       <!-- put amp-analytics > 3 viewports away from viewport -->
-      <div style="height: 400vh"></div>
+      <div style="height: 400vh">
+        viewport
+      </div>
       <amp-analytics>
         <script type="application/json">
         {
@@ -47,7 +49,11 @@ describe('amp-analytics', function() {
             "a": 1,
             "b": "\${title}",
             "cid": "\${clientId(_cid)}",
+            "loadend": "\${navTiming(loadEventEnd)}",
             "default": "\$DEFAULT( , test)",
+            "fcp": "FIRST_CONTENTFUL_PAINT",
+            "fvr": "FIRST_VIEWPORT_READY",
+            "mbv": "MAKE_BODY_VISIBLE",
             "cookie": "\${cookie(test-cookie)}"
           }
         }
@@ -67,10 +73,16 @@ describe('amp-analytics', function() {
           expect(q['a']).to.equal('2');
           expect(q['b']).to.equal('AMP TEST');
           expect(q['cid']).to.equal('amp-12345');
+          expect(q['loadend']).to.not.equal('0');
           expect(q['default']).to.equal('test');
           // cookie set via http response header when requesting
           // localhost:9876/amp4test/compose-doc
           expect(q['cookie']).to.equal('test');
+
+          // FCP only resolves for Chrome and Opera
+          expect(q['fcp']).to.not.be.null;
+          expect(q['fvr']).to.not.be.null;
+          expect(q['mbv']).to.not.be.null;
           expect(
             req.headers.referer,
             'should keep referrer if no referrerpolicy specified'

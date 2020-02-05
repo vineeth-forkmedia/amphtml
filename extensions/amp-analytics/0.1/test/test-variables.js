@@ -142,17 +142,25 @@ describes.fakeWin('amp-analytics.VariableService', {amp: true}, env => {
     it('expands array vars', () => {
       check(
         '${array}',
-        'xy%26x,MACRO(abc,def),MACRO(abc%2Cdef)%26123,%24%7Bfoo%7D',
+        '123,xy%26x,MACRO(abc,def),MACRO(abc%2Cdef)%26123,bar,',
         {
           'foo': 'bar',
           'array': [
+            123,
             'xy&x', // special chars should be encoded
             'MACRO(abc,def)', // do not encode macro
             'MACRO(abc,def)&123', // this is not a macro
-            '${foo}', // vars in array is not expanded
+            '${foo}', // vars in array should be expanded
+            '${bar}', // undefined vars should be empty
           ],
         }
       );
+    });
+
+    it('handles array with no vars', () => {
+      check('${array}', 'foo,bar', {
+        'array': ['foo', 'bar'],
+      });
     });
 
     it('handles empty var name', () => {
@@ -191,10 +199,9 @@ describes.fakeWin('amp-analytics.VariableService', {amp: true}, env => {
     let doc;
     let win;
     let urlReplacementService;
-    let sandbox;
+    let analyticsElement;
 
     beforeEach(() => {
-      sandbox = env.sandbox;
       win = env.win;
       doc = win.document;
       installLinkerReaderService(win);
@@ -202,16 +209,21 @@ describes.fakeWin('amp-analytics.VariableService', {amp: true}, env => {
       variables = variableServiceForDoc(doc);
       const {documentElement} = win.document;
       urlReplacementService = Services.urlReplacementsForDoc(documentElement);
+      analyticsElement = doc.createElement('amp-analytics');
+      doc.body.appendChild(analyticsElement);
     });
 
     function check(input, output, opt_bindings) {
-      const macros = Object.assign(variables.getMacros(), opt_bindings);
+      const macros = Object.assign(
+        variables.getMacros(analyticsElement),
+        opt_bindings
+      );
       const expanded = urlReplacementService.expandUrlAsync(input, macros);
       return expect(expanded).to.eventually.equal(output);
     }
 
     it('handles consecutive macros in inner arguments', () => {
-      sandbox.useFakeTimers(123456789);
+      env.sandbox.useFakeTimers(123456789);
       win.location.href = 'https://example.com/?test=yes';
       return check(
         '$IF(QUERY_PARAM(test), 1.$SUBSTR(TIMESTAMP, 0, 10)QUERY_PARAM(test), ``)',
@@ -220,7 +232,7 @@ describes.fakeWin('amp-analytics.VariableService', {amp: true}, env => {
     });
 
     it('handles consecutive macros w/o parens in inner arguments', () => {
-      sandbox.useFakeTimers(123456789);
+      env.sandbox.useFakeTimers(123456789);
       win.location.href = 'https://example.com/?test=yes';
       return check('$IF(QUERY_PARAM(test), 1.TIMESTAMP, ``)', '1.123456789');
     });
@@ -231,7 +243,7 @@ describes.fakeWin('amp-analytics.VariableService', {amp: true}, env => {
       }));
 
     it('should not trim right of string before macro', () => {
-      sandbox.useFakeTimers(123456789);
+      env.sandbox.useFakeTimers(123456789);
       win.location.href = 'https://example.com/?test=yes';
       return check(
         '$IF(QUERY_PARAM(test), foo TIMESTAMP, ``)',
@@ -354,13 +366,43 @@ describes.fakeWin('amp-analytics.VariableService', {amp: true}, env => {
 
     it('replaces LINKER_PARAM', () => {
       const linkerReader = linkerReaderServiceFor(win);
-      const linkerReaderStub = sandbox.stub(linkerReader, 'get');
+      const linkerReaderStub = env.sandbox.stub(linkerReader, 'get');
       linkerReaderStub.withArgs('gl', 'cid').returns('a1b2c3');
       linkerReaderStub.withArgs('gl', 'gclid').returns(123);
       return check(
         'LINKER_PARAM(gl, cid)&LINKER_PARAM(gl, gclid)',
         'a1b2c3&123'
       );
+    });
+
+    it('"COOKIE" resolves cookie value', async () => {
+      doc.cookie = 'test=123';
+      await check('COOKIE(test)', '123');
+      doc.cookie = '';
+    });
+
+    it('COOKIE resolves to empty string in FIE', async () => {
+      doc.cookie = 'test=123';
+      const fakeFie = doc.createElement('div');
+      fakeFie.classList.add('i-amphtml-fie');
+      doc.body.appendChild(fakeFie);
+      fakeFie.appendChild(analyticsElement);
+      await check('COOKIE(test)', '');
+      doc.cookie = '';
+    });
+
+    it('COOKIE resolves to empty string when inabox', async () => {
+      doc.cookie = 'test=123';
+      env.win.__AMP_MODE.runtime = 'inabox';
+      await check('COOKIE(test)', '');
+      doc.cookie = '';
+    });
+
+    it('COOKIE resolves to empty string on cache', async () => {
+      win.location = 'https://www-example-com.cdn.ampproject.org';
+      doc.cookie = 'test=123';
+      await check('COOKIE(test)', '');
+      doc.cookie = '';
     });
 
     describe('$MATCH', () => {
