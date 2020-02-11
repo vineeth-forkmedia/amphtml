@@ -25,23 +25,19 @@ export function forkmedia(global, data) {
   if (data.product === 'inread') {
     src = 'https://delivery.forkcdn.com/rappio/inread/v1.1/amp/inread.js';
   } else if (data.product === 'vibe') {
-    src = 'https://vibecdn.forkcdn.com/Inarticle/iav.js';
+    src = 'https://vibecdn.forkcdn.com/Inarticle/amp/iav.js';
   } else {
     src = 'https://delivery.forkcdn.com/amp/default.js';
   }
 
-  if (src) {
-    loadScript(
-      global,
-      src,
-      () => {
-        global.context.renderStart();
-      },
-      () => {
-        global.context.noContentAvailable();
-      }
-    );
-  } else {
-    global.context.noContentAvailable();
-  }
+  loadScript(
+    global,
+    src,
+    () => {
+      global.context.renderStart();
+    },
+    () => {
+      global.context.noContentAvailable();
+    }
+  );
 }
